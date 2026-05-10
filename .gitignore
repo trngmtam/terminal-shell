@@ -1,0 +1,16 @@
+# Mac OS System Files
+.DS_Store
+
+# Compiled Object files
+*.o
+*.out
+
+# Executables
+myshell
+crash_div
+crash_ptr
+test_error_handler
+
+# Log files
+*.log
+shell_errors.log

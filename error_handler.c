@@ -102,12 +102,10 @@ static void report_crash(const char *cmd_name, int sig, int line_num) {
 
     fprintf(stderr,
         COLOR_RED COLOR_BOLD
-        "╔══ [CRASH] ══════════════════════════════════╗\n"
         "  Lệnh  : %s\n"
         "  Dòng  : %d\n"
         "  Signal: %s (số %d)\n"
         "  Lý do : %s\n"
-        "╚═════════════════════════════════════════════╝"
         COLOR_RESET "\n",
         cmd_name, line_num, sig_name, sig, sig_desc);
 
