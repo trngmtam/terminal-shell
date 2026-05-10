@@ -178,7 +178,7 @@ static CmdResult execute_with_redirect(char **args,
         }
         execvp(args[0], args);
         fprintf(stderr, "myshell: %s: command not found\n", args[0]);
-        exit(127);
+        _exit(127);
     }
 
     // === PROCESS CHA ===
@@ -221,7 +221,7 @@ static CmdResult execute_pipe(char **args1, char **args2, int line_num) {
         close(pipefd[1]);
         execvp(args1[0], args1);
         fprintf(stderr, "myshell: %s: command not found\n", args1[0]);
-        exit(127);
+        _exit(127);
     }
 
     // Process con 2: lệnh bên PHẢI pipe, đọc từ pipe
@@ -233,7 +233,7 @@ static CmdResult execute_pipe(char **args1, char **args2, int line_num) {
         close(pipefd[0]);
         execvp(args2[0], args2);
         fprintf(stderr, "myshell: %s: command not found\n", args2[0]);
-        exit(127);
+        _exit(127);
     }
 
     // Cha đóng cả 2 đầu và chờ 2 con
@@ -319,9 +319,12 @@ CmdResult execute_command(char **args, int line_num) {
 
     if (pid == 0) {
         // === PROCESS CON ===
+        // Reset stdin ve /dev/null de tranh con doc lai file script
+        int dn = open("/dev/null", 0);
+        if (dn >= 0) { dup2(dn, STDIN_FILENO); close(dn); }
         execvp(args[0], args);
         fprintf(stderr, "myshell: %s: command not found\n", args[0]);
-        exit(127);
+        _exit(127);
     }
 
     // === PROCESS CHA ===
