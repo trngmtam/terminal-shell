@@ -119,6 +119,12 @@ static CmdResult run_with_timeout(char **args, int line_num) {
  * ====================================================== */
 void run_script(const char *filename, int stop_on_error) {
     FILE *fp = fopen(filename, "r");
+    if (fp != NULL) {
+        // FD_CLOEXEC: tu dong dong fd nay trong process con sau fork/exec
+        // Ngan child doc lai script khi execvp that bai
+        int fd = fileno(fp);
+        fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
+    }
     if (fp == NULL) {
         fprintf(stderr, "\033[31mLỗi: Không mở được file '%s'\033[0m\n", filename);
         exit(1);
