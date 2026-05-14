@@ -1,343 +1,360 @@
 /*
- * shell.c — Member A: Shell & Command Parser
+ * myshell.c — A simple Unix shell implementation
+ * Member A: REPL + Tokenizer + Fork/Exec + Pipe + Redirect + Builtins
  *
- * Nhiệm vụ:
- *  1. Tokenizer       — tách chuỗi lệnh thành args[]
- *  2. Fork/Exec       — tạo process con để chạy lệnh
- *  3. Pipe ( | )      — kết nối stdout lệnh trái với stdin lệnh phải
- *  4. Redirect (>,<,>>) — chuyển hướng stdin/stdout vào file
- *  5. Built-ins       — cd, pwd, exit, help
+ * Compile: gcc -o shell shell.c -Wall
+ * Run:     ./shell
  */
-
-#include "shared.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <sys/wait.h>
-#include <signal.h>
+#include <fcntl.h>
+#include <errno.h>
 
-/* ======================================================
- *  TASK 1: TOKENIZER
- *  Tách chuỗi input thành mảng args[], kết thúc bằng NULL.
- *  Trả về số lượng token.
- * ====================================================== */
-int tokenize(char *input, char **args) {
+/* ─── Constants ─────────────────────────────────────────────────── */
+#define MAX_INPUT    1024
+#define MAX_ARGS     64
+#define MAX_PIPES    16
+#define DELIMITERS   " \t\r\n"
+
+/* ─── Struct: parsed command ─────────────────────────────────────── */
+typedef struct {
+    char *args[MAX_ARGS];   /* argument list, NULL-terminated        */
+    int   argc;             /* number of arguments                   */
+    char *in_file;          /* redirect stdin  (<)                   */
+    char *out_file;         /* redirect stdout (>)                   */
+    int   append;           /* 1 = append (>>), 0 = truncate (>)     */
+} Command;
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  TASK 2 — Tokenizer
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/*
+ * tokenize_raw:
+ *   Split `input` on whitespace and fill `args`.
+ *   Returns number of tokens found.
+ */
+static int tokenize_raw(char *input, char **args)
+{
     int count = 0;
-    char *token = strtok(input, " \t\r\n");
+    char *token = strtok(input, DELIMITERS);
     while (token != NULL && count < MAX_ARGS - 1) {
         args[count++] = token;
-        token = strtok(NULL, " \t\r\n");
+        token = strtok(NULL, DELIMITERS);
     }
-    args[count] = NULL; // Bắt buộc cho execvp()
+    args[count] = NULL;
     return count;
 }
 
-/* ======================================================
- *  TASK 5: BUILT-IN COMMANDS
- *  Xử lý trực tiếp trong process cha (không fork).
- *  Trả về 1 nếu đã xử lý, 0 nếu không phải built-in.
- * ====================================================== */
-int handle_builtin(char **args) {
-    if (args[0] == NULL) return 1;
+/*
+ * parse_command:
+ *   Build a Command from a raw token list, stripping redirect
+ *   operators (>, >>, <) and recording their file names.
+ */
+static void parse_command(char **tokens, int ntok, Command *cmd)
+{
+    memset(cmd, 0, sizeof(Command));
+    int j = 0;
 
-    // cd [path]
-    if (strcmp(args[0], "cd") == 0) {
-        char *path = args[1] ? args[1] : getenv("HOME");
-        if (path == NULL) path = "/";
-        if (chdir(path) != 0) {
-            perror("cd");
-        }
-        return 1;
-    }
-
-    // pwd — in thư mục hiện tại
-    if (strcmp(args[0], "pwd") == 0) {
-        char cwd[MAX_INPUT];
-        if (getcwd(cwd, sizeof(cwd)) != NULL) {
-            printf("%s\n", cwd);
+    for (int i = 0; i < ntok; i++) {
+        if (strcmp(tokens[i], ">") == 0 && i + 1 < ntok) {
+            cmd->out_file = tokens[++i];
+            cmd->append   = 0;
+        } else if (strcmp(tokens[i], ">>") == 0 && i + 1 < ntok) {
+            cmd->out_file = tokens[++i];
+            cmd->append   = 1;
+        } else if (strcmp(tokens[i], "<") == 0 && i + 1 < ntok) {
+            cmd->in_file  = tokens[++i];
         } else {
-            perror("pwd");
+            cmd->args[j++] = tokens[i];
         }
-        return 1;
     }
-
-    // exit [code]
-    if (strcmp(args[0], "exit") == 0) {
-        int code = args[1] ? atoi(args[1]) : 0;
-        printf("Goodbye!\n");
-        exit(code);
-    }
-
-    // help
-    if (strcmp(args[0], "help") == 0) {
-        printf("\033[1mmyshell\033[0m — Built-in commands:\n");
-        printf("  cd [dir]   — đổi thư mục làm việc\n");
-        printf("  pwd        — in thư mục hiện tại\n");
-        printf("  exit [n]   — thoát shell (exit code n, mặc định 0)\n");
-        printf("  help       — hiển thị trợ giúp này\n");
-        printf("\nLệnh bên ngoài: dùng fork/exec, hỗ trợ pipe (|) và redirect (>, <, >>)\n");
-        return 1;
-    }
-
-    return 0; // Không phải built-in
+    cmd->args[j] = NULL;
+    cmd->argc    = j;
 }
 
-/* ======================================================
- *  PHÁT HIỆN PIPE VÀ REDIRECT TRONG ARGS
- *
- *  Hàm find_pipe() tìm vị trí ký tự "|" trong args[].
- *  Trả về index của "|", hoặc -1 nếu không có.
- * ====================================================== */
-static int find_pipe(char **args) {
-    for (int i = 0; args[i] != NULL; i++) {
-        if (strcmp(args[i], "|") == 0) return i;
+/* ═══════════════════════════════════════════════════════════════════
+ *  TASK 6 — Built-in commands
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/*
+ * handle_builtin:
+ *   Returns 1 and executes the command if it is a built-in.
+ *   Returns 0 if the command should be dispatched externally.
+ */
+static int handle_builtin(char **args)
+{
+    if (args[0] == NULL) return 1;
+
+    /* ── cd ── */
+    if (strcmp(args[0], "cd") == 0) {
+        const char *path = args[1] ? args[1] : getenv("HOME");
+        if (path == NULL) path = "/";
+        if (chdir(path) != 0)
+            perror("cd");
+        return 1;
+    }
+
+    /* ── pwd ── */
+    if (strcmp(args[0], "pwd") == 0) {
+        char cwd[MAX_INPUT];
+        if (getcwd(cwd, sizeof(cwd)) != NULL)
+            printf("%s\n", cwd);
+        else
+            perror("pwd");
+        return 1;
+    }
+
+    /* ── exit ── */
+    if (strcmp(args[0], "exit") == 0) {
+        printf("Goodbye!\n");
+        exit(0);
+    }
+
+    /* ── help ── */
+    if (strcmp(args[0], "help") == 0) {
+        printf("myshell — available built-in commands:\n");
+        printf("  cd [dir]   change working directory\n");
+        printf("  pwd        print working directory\n");
+        printf("  exit       quit the shell\n");
+        printf("  help       show this help message\n");
+        printf("\nOther Unix commands are run via fork/exec.\n");
+        printf("Supports:  cmd | cmd   (pipe)\n");
+        printf("           cmd > file  (redirect stdout, truncate)\n");
+        printf("           cmd >> file (redirect stdout, append)\n");
+        printf("           cmd < file  (redirect stdin)\n");
+        return 1;
+    }
+
+    return 0; /* not a built-in */
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  TASK 3 — Fork / Exec  (single command, with optional redirect)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/*
+ * apply_redirects:
+ *   Called inside the child process to wire up file descriptors.
+ */
+static void apply_redirects(Command *cmd)
+{
+    if (cmd->in_file) {
+        int fd = open(cmd->in_file, O_RDONLY);
+        if (fd < 0) { perror(cmd->in_file); exit(1); }
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+    }
+    if (cmd->out_file) {
+        int flags = O_WRONLY | O_CREAT | (cmd->append ? O_APPEND : O_TRUNC);
+        int fd = open(cmd->out_file, flags, 0644);
+        if (fd < 0) { perror(cmd->out_file); exit(1); }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+    }
+}
+
+/*
+ * execute_single:
+ *   Fork and exec one Command.  Returns child's exit status.
+ */
+static int execute_single(Command *cmd)
+{
+    /* Built-ins must run in the parent process */
+    if (handle_builtin(cmd->args)) return 0;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* ── child ── */
+        apply_redirects(cmd);
+        execvp(cmd->args[0], cmd->args);
+        /* execvp only returns on error */
+        fprintf(stderr, "myshell: %s: command not found\n", cmd->args[0]);
+        exit(127);
+    }
+
+    /* ── parent: wait for child ── */
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code != 0)
+            fprintf(stderr, "[exit code: %d]\n", code);
+        return code;
     }
     return -1;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ *  TASK 4 — Pipeline  (one or more commands joined by |)
+ * ═══════════════════════════════════════════════════════════════════ */
+
 /*
- * Hàm parse_redirects() quét args[] để tìm >, <, >>.
- * Điền vào out_file / in_file / append_file nếu tìm thấy.
- * Xóa các token redirect khỏi args[] để execvp không bị lỗi.
+ * execute_pipeline:
+ *   Given an array of Commands of length n, wire them up with pipes.
+ *   The first command may still have < redirect; the last may have > / >>.
  */
-static void parse_redirects(char **args,
-                             char **out_file,
-                             char **in_file,
-                             int  *append) {
-    *out_file = NULL;
-    *in_file  = NULL;
-    *append   = 0;
-
-    int i = 0;
-    while (args[i] != NULL) {
-        if (strcmp(args[i], ">") == 0 && args[i+1] != NULL) {
-            *out_file = args[i+1];
-            *append   = 0;
-            // Xóa 2 token ">", "filename" khỏi mảng
-            int j = i;
-            while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
-            args[j] = NULL; args[j+1] = NULL;
-            continue; // Không tăng i, kiểm tra lại vị trí i
-        }
-        if (strcmp(args[i], ">>") == 0 && args[i+1] != NULL) {
-            *out_file = args[i+1];
-            *append   = 1;
-            int j = i;
-            while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
-            args[j] = NULL; args[j+1] = NULL;
-            continue;
-        }
-        if (strcmp(args[i], "<") == 0 && args[i+1] != NULL) {
-            *in_file = args[i+1];
-            int j = i;
-            while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
-            args[j] = NULL; args[j+1] = NULL;
-            continue;
-        }
-        i++;
+static void execute_pipeline(Command *cmds, int n)
+{
+    if (n == 1) {
+        execute_single(&cmds[0]);
+        return;
     }
+
+    /*
+     * Strategy:
+     *  - We keep track of the "read end" of the previous pipe.
+     *  - For each command we create a new pipe (except after the last).
+     *  - Each child inherits the right fds and closes everything else.
+     */
+
+    int   prev_read = -1;   /* read-end of pipe from previous stage   */
+    pid_t pids[MAX_PIPES];
+
+    for (int i = 0; i < n; i++) {
+        int pipefd[2] = {-1, -1};
+
+        /* create pipe between stage i and i+1 (not needed after last) */
+        if (i < n - 1) {
+            if (pipe(pipefd) == -1) {
+                perror("pipe");
+                return;
+            }
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) { perror("fork"); return; }
+
+        if (pid == 0) {
+            /* ── child i ── */
+
+            /* Connect previous pipe to stdin (unless first command) */
+            if (prev_read != -1) {
+                dup2(prev_read, STDIN_FILENO);
+                close(prev_read);
+            }
+
+            /* Connect write-end of our new pipe to stdout
+               (unless last command)                                  */
+            if (i < n - 1) {
+                dup2(pipefd[1], STDOUT_FILENO);
+                close(pipefd[0]);
+                close(pipefd[1]);
+            }
+
+            /* File redirects (only meaningful on first / last stage) */
+            apply_redirects(&cmds[i]);
+
+            execvp(cmds[i].args[0], cmds[i].args);
+            fprintf(stderr, "myshell: %s: command not found\n",
+                    cmds[i].args[0]);
+            exit(127);
+        }
+
+        /* ── parent ── */
+        pids[i] = pid;
+
+        /* Close the previous read-end now that it's been inherited */
+        if (prev_read != -1) close(prev_read);
+
+        /* The new read-end becomes prev_read for next iteration     */
+        if (i < n - 1) {
+            close(pipefd[1]);          /* parent doesn't write here  */
+            prev_read = pipefd[0];
+        }
+    }
+
+    /* Wait for all children */
+    for (int i = 0; i < n; i++)
+        waitpid(pids[i], NULL, 0);
 }
 
-/* ======================================================
- *  TASK 4: REDIRECT — chạy lệnh với chuyển hướng file
- * ====================================================== */
-static CmdResult execute_with_redirect(char **args,
-                                       char *out_file,
-                                       char *in_file,
-                                       int   append,
-                                       int   line_num) {
-    CmdResult result;
-    memset(&result, 0, sizeof(result));
-    strncpy(result.cmd_name, args[0] ? args[0] : "(empty)", 255);
-    result.line_num = line_num;
+/* ═══════════════════════════════════════════════════════════════════
+ *  High-level line dispatcher
+ * ═══════════════════════════════════════════════════════════════════ */
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        result.exit_code = -1;
-        return result;
+/*
+ * run_line:
+ *   Parse and execute one line of user input.
+ *   Splits on '|' to find pipeline stages, then parses each stage's
+ *   tokens into a Command (handling <, >, >>).
+ */
+static void run_line(char *line)
+{
+    /* --- Split line on '|' to get segments --- */
+    char *segments[MAX_PIPES];
+    int   nseg = 0;
+
+    char *seg = strtok(line, "|");
+    while (seg != NULL && nseg < MAX_PIPES) {
+        segments[nseg++] = seg;
+        seg = strtok(NULL, "|");
     }
 
-    if (pid == 0) {
-        // === PROCESS CON ===
-        if (out_file != NULL) {
-            int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-            int fd = open(out_file, flags, 0644);
-            if (fd < 0) { perror("open (output redirect)"); exit(1); }
-            dup2(fd, STDOUT_FILENO);
-            close(fd);
+    Command cmds[MAX_PIPES];
+
+    for (int i = 0; i < nseg; i++) {
+        char *tokens[MAX_ARGS];
+        int ntok = tokenize_raw(segments[i], tokens);
+        if (ntok == 0) {
+            fprintf(stderr, "myshell: empty command in pipeline\n");
+            return;
         }
-        if (in_file != NULL) {
-            int fd = open(in_file, O_RDONLY);
-            if (fd < 0) { perror("open (input redirect)"); exit(1); }
-            dup2(fd, STDIN_FILENO);
-            close(fd);
+        parse_command(tokens, ntok, &cmds[i]);
+        if (cmds[i].argc == 0) {
+            fprintf(stderr, "myshell: empty command in pipeline\n");
+            return;
         }
-        execvp(args[0], args);
-        fprintf(stderr, "myshell: %s: command not found\n", args[0]);
-        _exit(127);
     }
 
-    // === PROCESS CHA ===
-    int status;
-    waitpid(pid, &status, 0);
-    check_and_report(args[0], status, line_num);
-
-    if (WIFEXITED(status)) {
-        result.exit_code  = WEXITSTATUS(status);
-        result.signal_num = 0;
-    } else if (WIFSIGNALED(status)) {
-        result.exit_code  = -1;
-        result.signal_num = WTERMSIG(status);
-    }
-    return result;
+    execute_pipeline(cmds, nseg);
 }
 
-/* ======================================================
- *  TASK 3: PIPE — chạy 2 lệnh nối bằng pipe
- * ====================================================== */
-static CmdResult execute_pipe(char **args1, char **args2, int line_num) {
-    CmdResult result;
-    memset(&result, 0, sizeof(result));
-    strncpy(result.cmd_name, args1[0] ? args1[0] : "(pipe)", 255);
-    result.line_num = line_num;
+/* ═══════════════════════════════════════════════════════════════════
+ *  TASK 1 — REPL main loop
+ * ═══════════════════════════════════════════════════════════════════ */
 
-    int pipefd[2]; // [0]=đọc, [1]=ghi
-    if (pipe(pipefd) == -1) {
-        perror("pipe");
-        result.exit_code = -1;
-        return result;
-    }
+int main(void)
+{
+    char input[MAX_INPUT];
 
-    // Process con 1: lệnh bên TRÁI pipe, ghi vào pipe
-    pid_t pid1 = fork();
-    if (pid1 < 0) { perror("fork"); result.exit_code = -1; return result; }
-    if (pid1 == 0) {
-        dup2(pipefd[1], STDOUT_FILENO); // stdout → pipe write
-        close(pipefd[0]);
-        close(pipefd[1]);
-        execvp(args1[0], args1);
-        fprintf(stderr, "myshell: %s: command not found\n", args1[0]);
-        _exit(127);
-    }
+    printf("myshell — type 'help' for built-in commands, Ctrl+D to quit\n");
 
-    // Process con 2: lệnh bên PHẢI pipe, đọc từ pipe
-    pid_t pid2 = fork();
-    if (pid2 < 0) { perror("fork"); result.exit_code = -1; return result; }
-    if (pid2 == 0) {
-        dup2(pipefd[0], STDIN_FILENO); // stdin ← pipe read
-        close(pipefd[1]);
-        close(pipefd[0]);
-        execvp(args2[0], args2);
-        fprintf(stderr, "myshell: %s: command not found\n", args2[0]);
-        _exit(127);
-    }
+    while (1) {
+        /* Print prompt */
+        printf("myshell> ");
+        fflush(stdout);
 
-    // Cha đóng cả 2 đầu và chờ 2 con
-    close(pipefd[0]);
-    close(pipefd[1]);
-
-    int status1, status2;
-    waitpid(pid1, &status1, 0);
-    waitpid(pid2, &status2, 0);
-
-    // Báo lỗi nếu có
-    check_and_report(args1[0], status1, line_num);
-    check_and_report(args2[0], status2, line_num);
-
-    if (WIFEXITED(status2)) {
-        result.exit_code  = WEXITSTATUS(status2); // exit code của lệnh phải
-        result.signal_num = 0;
-    } else if (WIFSIGNALED(status2)) {
-        result.exit_code  = -1;
-        result.signal_num = WTERMSIG(status2);
-    }
-    return result;
-}
-
-/* ======================================================
- *  TASK 2 + TỔNG HỢP: EXECUTE_COMMAND
- *
- *  Đây là hàm chính mà Member B gọi.
- *  Tự động phát hiện và xử lý:
- *    - Built-in commands
- *    - Pipe (|)
- *    - Redirect (>, <, >>)
- *    - Lệnh thông thường (fork/exec)
- * ====================================================== */
-CmdResult execute_command(char **args, int line_num) {
-    CmdResult result;
-    memset(&result, 0, sizeof(result));
-    result.line_num = line_num;
-
-    if (args[0] == NULL) return result; // Lệnh rỗng
-
-    strncpy(result.cmd_name, args[0], 255);
-
-    // Kiểm tra built-in trước
-    if (handle_builtin(args)) {
-        result.exit_code = 0;
-        return result;
-    }
-
-    // Kiểm tra có pipe không
-    int pipe_pos = find_pipe(args);
-    if (pipe_pos >= 0) {
-        // Tách args thành 2 mảng: trái và phải pipe
-        args[pipe_pos] = NULL;         // Cắt tại "|"
-        char **args_left  = args;
-        char **args_right = args + pipe_pos + 1;
-
-        if (args_right[0] == NULL) {
-            fprintf(stderr, "myshell: lỗi cú pháp: thiếu lệnh sau '|'\n");
-            result.exit_code = 1;
-            return result;
+        /* Read a line */
+        if (fgets(input, MAX_INPUT, stdin) == NULL) {
+            /* Ctrl+D (EOF) */
+            printf("\n");
+            break;
         }
-        return execute_pipe(args_left, args_right, line_num);
+
+        /* Strip trailing newline */
+        input[strcspn(input, "\n")] = '\0';
+
+        /* Skip blank lines */
+        if (strlen(input) == 0) continue;
+
+        /* Make a working copy because strtok mutates the string */
+        char copy[MAX_INPUT];
+        strncpy(copy, input, MAX_INPUT - 1);
+        copy[MAX_INPUT - 1] = '\0';
+
+        run_line(copy);
     }
 
-    // Kiểm tra redirect
-    char *out_file = NULL;
-    char *in_file  = NULL;
-    int   append   = 0;
-    parse_redirects(args, &out_file, &in_file, &append);
-
-    if (out_file != NULL || in_file != NULL) {
-        return execute_with_redirect(args, out_file, in_file, append, line_num);
-    }
-
-    // Lệnh thông thường — fork/exec
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        result.exit_code = -1;
-        return result;
-    }
-
-    if (pid == 0) {
-        // === PROCESS CON ===
-        // Reset stdin ve /dev/null de tranh con doc lai file script
-        int dn = open("/dev/null", 0);
-        if (dn >= 0) { dup2(dn, STDIN_FILENO); close(dn); }
-        execvp(args[0], args);
-        fprintf(stderr, "myshell: %s: command not found\n", args[0]);
-        _exit(127);
-    }
-
-    // === PROCESS CHA ===
-    int status;
-    waitpid(pid, &status, 0);
-    check_and_report(args[0], status, line_num);
-
-    if (WIFEXITED(status)) {
-        result.exit_code  = WEXITSTATUS(status);
-        result.signal_num = 0;
-    } else if (WIFSIGNALED(status)) {
-        result.exit_code  = -1;
-        result.signal_num = WTERMSIG(status);
-    }
-    return result;
+    return 0;
 }
