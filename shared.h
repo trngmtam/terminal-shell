@@ -1,31 +1,34 @@
-// shared.h — Giao diện dùng chung giữa 3 members
+// shared.h — Shared interface between all 3 members
 #ifndef SHARED_H
 #define SHARED_H
 
 #include <sys/types.h>
 
+// Buffer and array size limits
 #define MAX_INPUT    1024
 #define MAX_ARGS     64
 #define LOG_FILE     "shell_errors.log"
 
-// === CẤU TRÚC KẾT QUẢ CHẠY LỆNH ===
+
+// Command execution result — returned by execute_command()
 typedef struct {
-    int  exit_code;       // Exit code của process (0 = thành công)
-    int  signal_num;      // Signal nếu bị crash (0 = không crash)
-    char cmd_name[256];   // Tên lệnh đã chạy
-    int  line_num;        // Dòng trong script (0 nếu interactive)
+    int  exit_code;       // Process exit code (0 = success)
+    int  signal_num;      // Signal number if the process crashed (0 = no crash)
+    char cmd_name[256];   // Name of the command that was run
+    int  line_num;        // Line number in the script (0 if interactive mode)
 } CmdResult;
 
-// === HÀM CỦA MEMBER A (định nghĩa trong shell.c) ===
+
+// Functions provided by Member A (defined in shell.c)
 int       tokenize(char *input, char **args);
 CmdResult execute_command(char **args, int line_num);
 int       handle_builtin(char **args);
 
-// === HÀM CỦA MEMBER B (định nghĩa trong runner.c) ===
+// Functions provided by Member B (defined in runner.c)
 void run_script(const char *filename, int stop_on_error);
 void setup_signals(void);
 
-// === HÀM CỦA MEMBER C (định nghĩa trong error_handler.c) ===
+// Functions provided by Member C (defined in error_handler.c)
 int  check_and_report(const char *cmd_name, int status, int line_num);
 void log_error(const char *cmd, const char *sig_name,
                const char *sig_desc, int line_num);
