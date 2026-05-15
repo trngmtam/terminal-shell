@@ -1,11 +1,11 @@
 /*
  * error_handler.c — Member C: Exception & Error Handler
  *
- * Nhiệm vụ:
- *  1. Giải mã signal thành tên lỗi có mô tả
- *  2. In thông báo lỗi có màu ra terminal
- *  3. Ghi log vào file shell_errors.log với timestamp
- *  4. Hàm check_and_report() dùng chung cho Member A và B
+ * Responsibilities:
+ *  1. Decode signals into named error descriptions
+ *  2. Print colored error messages to the terminal
+ *  3. Write log entries to shell_errors.log with timestamps
+ *  4. check_and_report() is the shared function used by Member A and B
  */
 
 #include "shared.h"
@@ -18,9 +18,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* ======================================================
- *  MÃ MÀU ANSI
- * ====================================================== */
 #define COLOR_RED     "\033[31m"
 #define COLOR_YELLOW  "\033[33m"
 #define COLOR_GREEN   "\033[32m"
@@ -28,9 +25,7 @@
 #define COLOR_BOLD    "\033[1m"
 #define COLOR_RESET   "\033[0m"
 
-/* ======================================================
- *  TASK 1: BẢNG GIẢI MÃ SIGNAL
- * ====================================================== */
+
 typedef struct {
     int         signal_num;
     const char *name;
@@ -38,17 +33,17 @@ typedef struct {
 } SignalInfo;
 
 static SignalInfo signal_table[] = {
-    { SIGSEGV,  "SIGSEGV",  "Segmentation fault (truy cập vùng nhớ không hợp lệ)" },
-    { SIGFPE,   "SIGFPE",   "Floating point exception (chia cho 0, tràn số)"       },
-    { SIGILL,   "SIGILL",   "Illegal instruction (lệnh CPU không hợp lệ)"          },
-    { SIGBUS,   "SIGBUS",   "Bus error (lỗi căn chỉnh bộ nhớ)"                    },
-    { SIGABRT,  "SIGABRT",  "Abort (chương trình tự gọi abort())"                  },
-    { SIGKILL,  "SIGKILL",  "Killed (bị kill bởi hệ thống hoặc timeout)"           },
-    { SIGTERM,  "SIGTERM",  "Terminated (yêu cầu kết thúc bình thường)"            },
-    { SIGPIPE,  "SIGPIPE",  "Broken pipe (ghi vào pipe không có reader)"           },
-    { SIGINT,   "SIGINT",   "Interrupted (người dùng nhấn Ctrl+C)"                 },
-    { SIGALRM,  "SIGALRM",  "Alarm (timeout do shell đặt)"                        },
-    { SIGHUP,   "SIGHUP",   "Hangup (terminal bị đóng)"                           },
+    { SIGSEGV,  "SIGSEGV",  "Segmentation fault (invalid memory access)"           },
+    { SIGFPE,   "SIGFPE",   "Floating point exception (divide by zero, overflow)"  },
+    { SIGILL,   "SIGILL",   "Illegal instruction (invalid CPU instruction)"        },
+    { SIGBUS,   "SIGBUS",   "Bus error (memory alignment error)"                   },
+    { SIGABRT,  "SIGABRT",  "Abort (program called abort())"                       },
+    { SIGKILL,  "SIGKILL",  "Killed (terminated by system or timeout)"             },
+    { SIGTERM,  "SIGTERM",  "Terminated (graceful termination requested)"          },
+    { SIGPIPE,  "SIGPIPE",  "Broken pipe (write to pipe with no reader)"           },
+    { SIGINT,   "SIGINT",   "Interrupted (user pressed Ctrl+C)"                    },
+    { SIGALRM,  "SIGALRM",  "Alarm (timeout set by shell)"                        },
+    { SIGHUP,   "SIGHUP",   "Hangup (terminal closed)"                            },
     { -1,       NULL,       NULL                                                    }
 };
 
@@ -68,21 +63,18 @@ const char *get_signal_description(int sig) {
     return "Unknown signal";
 }
 
-/* ======================================================
- *  TASK 3: GHI LOG FILE VỚI TIMESTAMP
- * ====================================================== */
 void log_error(const char *cmd,
                const char *sig_name,
                const char *sig_desc,
                int         line_num) {
-    FILE *fp = fopen(LOG_FILE, "a"); // "a" = append, không ghi đè
+    FILE *fp = fopen(LOG_FILE, "a"); // "a" = append, do not overwrite
     if (fp == NULL) {
-        // Không crash shell chỉ vì không ghi được log
+        // Don't crash the shell just because logging failed
         perror("log_error: fopen");
         return;
     }
 
-    // Lấy thời gian hiện tại
+    // Get current timestamp
     time_t now = time(NULL);
     char time_str[64];
     strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&now));
@@ -93,50 +85,41 @@ void log_error(const char *cmd,
     fclose(fp);
 }
 
-/* ======================================================
- *  TASK 2: IN LỖI CÓ MÀU RA TERMINAL
- * ====================================================== */
 static void report_crash(const char *cmd_name, int sig, int line_num) {
     const char *sig_name = get_signal_name(sig);
     const char *sig_desc = get_signal_description(sig);
 
     fprintf(stderr,
         COLOR_RED COLOR_BOLD
-        "  Lệnh  : %s\n"
-        "  Dòng  : %d\n"
-        "  Signal: %s (số %d)\n"
-        "  Lý do : %s\n"
+        "  Command: %s\n"
+        "  Line   : %d\n"
+        "  Signal : %s (no. %d)\n"
+        "  Reason : %s\n"
         COLOR_RESET "\n",
         cmd_name, line_num, sig_name, sig, sig_desc);
 
-    // Ghi vào log file
+    // Write to log file
     log_error(cmd_name, sig_name, sig_desc, line_num);
 }
 
 static void report_exit_error(const char *cmd_name, int code, int line_num) {
-    // exit code 127 = command not found, đã có thông báo từ execvp
+    // exit code 127 = command not found, already reported by execvp
     if (code == 127) return;
 
     fprintf(stderr,
         COLOR_YELLOW
-        "[WARN] '%s' thoát với exit code %d (dòng %d)"
+        "[WARN] '%s' exited with exit code %d (line %d)"
         COLOR_RESET "\n",
         cmd_name, code, line_num);
 
     log_error(cmd_name, "EXIT_ERROR", "Non-zero exit code", line_num);
 }
 
-/* ======================================================
- *  TASK 4: HÀM TỔNG HỢP — check_and_report()
- *
- *  Gọi ngay sau mỗi waitpid().
- *  Trả về: 0 nếu thành công, -1 nếu có lỗi.
- * ====================================================== */
 int check_and_report(const char *cmd_name, int status, int line_num) {
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
         if (code == 0) {
-            return 0; // Thành công — không in gì
+            return 0; // Success — print nothing
         }
         report_exit_error(cmd_name, code, line_num);
         return -1;
@@ -151,7 +134,7 @@ int check_and_report(const char *cmd_name, int status, int line_num) {
     if (WIFSTOPPED(status)) {
         int sig = WSTOPSIG(status);
         fprintf(stderr,
-            COLOR_CYAN "[INFO] '%s' bị tạm dừng (signal %d)\n" COLOR_RESET,
+            COLOR_CYAN "[INFO] '%s' was stopped (signal %d)\n" COLOR_RESET,
             cmd_name, sig);
         return -1;
     }

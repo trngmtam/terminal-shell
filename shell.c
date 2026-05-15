@@ -1,3 +1,5 @@
+#include "shared.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,14 +9,11 @@
 #include <errno.h>
 
 
-// Constants
-#define MAX_INPUT    1024
-#define MAX_ARGS     64
 #define MAX_PIPES    16
 #define DELIMITERS   " \t\r\n"
 
 
-// Command — holds a parsed command with its arguments and redirects
+// Command: holds a parsed command with its arguments and redirects
 typedef struct {
     char *args[MAX_ARGS];   // argument list, NULL-terminated
     int   argc;             // number of arguments
@@ -26,11 +25,9 @@ typedef struct {
 
 // Part 1: Tokenizer
 
-
-// tokenize_raw:
 // Split `input` on whitespace and fill `args`.
 // Returns the number of tokens found.
-static int tokenize_raw(char *input, char **args)
+int tokenize(char *input, char **args)
 {
     int count = 0;
     char *token = strtok(input, DELIMITERS);
@@ -42,7 +39,6 @@ static int tokenize_raw(char *input, char **args)
     return count;
 }
 
-// parse_command:
 // Build a Command from a raw token list, stripping redirect
 // operators (>, >>, <) and recording their target file names.
 static void parse_command(char **tokens, int ntok, Command *cmd)
@@ -70,11 +66,9 @@ static void parse_command(char **tokens, int ntok, Command *cmd)
 
 // Part 2: Built-in commands
 
-
-// handle_builtin:
 // Executes the command if it is a built-in, then returns 1.
 // Returns 0 if the command is not a built-in and should be run externally.
-static int handle_builtin(char **args)
+int handle_builtin(char **args)
 {
     if (args[0] == NULL) return 1;
 
@@ -124,8 +118,6 @@ static int handle_builtin(char **args)
 
 // Part 3: Fork / Exec (single command, with optional redirect)
 
-
-// apply_redirects:
 // Called inside the child process to wire up file descriptors
 // before exec. Handles < (stdin) and > / >> (stdout).
 static void apply_redirects(Command *cmd)
@@ -145,7 +137,6 @@ static void apply_redirects(Command *cmd)
     }
 }
 
-// execute_single:
 // Fork and exec one Command. Returns the child's exit status.
 static int execute_single(Command *cmd)
 {
@@ -183,8 +174,6 @@ static int execute_single(Command *cmd)
 
 // Part 4: Pipeline (one or more commands joined by |)
 
-
-// execute_pipeline:
 // Given an array of Commands of length n, wire them together with pipes.
 // The first command may have a < redirect; the last may have > or >>.
 static void execute_pipeline(Command *cmds, int n)
@@ -260,79 +249,73 @@ static void execute_pipeline(Command *cmds, int n)
 }
 
 
-// Part 5: High-level line dispatcher
+// Part 5: execute_command — public entry point for main.c and runner.c
 
-
-// run_line:
-// Parse and execute one line of user input.
-// Splits on '|' to find pipeline stages, then parses each stage's
-// tokens into a Command (handling <, >, >>).
-static void run_line(char *line)
+// Parse the flat args[] array (which may contain '|' tokens as pipeline
+// separators), build Command structs, and execute the resulting pipeline.
+// Returns a CmdResult with exit_code and signal_num populated.
+CmdResult execute_command(char **args, int line_num)
 {
-    // Split the line on '|' to get individual pipeline segments
-    char *segments[MAX_PIPES];
-    int   nseg = 0;
+    CmdResult res;
+    memset(&res, 0, sizeof(res));
+    res.line_num = line_num;
+    if (args[0])
+        strncpy(res.cmd_name, args[0], sizeof(res.cmd_name) - 1);
 
-    char *seg = strtok(line, "|");
-    while (seg != NULL && nseg < MAX_PIPES) {
-        segments[nseg++] = seg;
-        seg = strtok(NULL, "|");
-    }
-
+    // Split args on '|' tokens to find pipeline stages
     Command cmds[MAX_PIPES];
+    int n = 0, start = 0;
 
-    for (int i = 0; i < nseg; i++) {
-        char *tokens[MAX_ARGS];
-        int ntok = tokenize_raw(segments[i], tokens);
-        if (ntok == 0) {
-            fprintf(stderr, "myshell: empty command in pipeline\n");
-            return;
+    for (int i = 0; ; i++) {
+        if (args[i] == NULL || strcmp(args[i], "|") == 0) {
+            if (i > start) {
+                parse_command(args + start, i - start, &cmds[n]);
+                if (cmds[n].argc > 0) n++;
+            } else if (i > 0) {
+                fprintf(stderr, "myshell: empty command in pipeline\n");
+                return res;
+            }
+            start = i + 1;
         }
-        parse_command(tokens, ntok, &cmds[i]);
-        if (cmds[i].argc == 0) {
-            fprintf(stderr, "myshell: empty command in pipeline\n");
-            return;
-        }
+        if (args[i] == NULL) break;
+        if (n >= MAX_PIPES)  break;
     }
 
-    execute_pipeline(cmds, nseg);
-}
+    if (n == 0) return res;
 
+    // Built-in: run in the parent process
+    if (n == 1 && handle_builtin(cmds[0].args)) return res;
 
-// Part 6: REPL main loop
+    if (n == 1) {
+        // Single external command: fork and capture full waitpid status
+        pid_t pid = fork();
+        if (pid < 0) { perror("fork"); res.exit_code = 1; return res; }
 
-
-int main(void)
-{
-    char input[MAX_INPUT];
-
-    printf("myshell — type 'help' for built-in commands, Ctrl+D to quit\n");
-
-    while (1) {
-        // Print the prompt
-        printf("myshell> ");
-        fflush(stdout);
-
-        // Read one line of input
-        // fgets returns NULL on EOF (Ctrl+D) → exit the loop
-        if (fgets(input, MAX_INPUT, stdin) == NULL) {
-            printf("\n");
-            break;
+        if (pid == 0) {
+            apply_redirects(&cmds[0]);
+            execvp(cmds[0].args[0], cmds[0].args);
+            fprintf(stderr, "myshell: %s: command not found\n", cmds[0].args[0]);
+            exit(127);
         }
 
-        // Strip the trailing newline left by fgets
-        input[strcspn(input, "\n")] = '\0';
+        // Publish the child PID so signal handlers can kill it
+        g_current_child = pid;
+        g_timeout_child = pid;
 
-        // Skip blank lines
-        if (strlen(input) == 0) continue;
+        int status;
+        waitpid(pid, &status, 0);
 
-        // Copy input before passing to run_line — strtok mutates the string
-        char copy[MAX_INPUT];
-        strncpy(copy, input, MAX_INPUT - 1);
-        copy[MAX_INPUT - 1] = '\0';
+        g_current_child = -1;
+        g_timeout_child = -1;
 
-        run_line(copy);
+        check_and_report(cmds[0].args[0], status, line_num);
+
+        if (WIFEXITED(status))   res.exit_code  = WEXITSTATUS(status);
+        if (WIFSIGNALED(status)) { res.signal_num = WTERMSIG(status); res.exit_code = 1; }
+    } else {
+        // Pipeline: execute and use the last stage's exit status
+        execute_pipeline(cmds, n);
     }
 
-    return 0;
+    return res;
 }

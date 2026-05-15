@@ -1,9 +1,9 @@
 /*
- * crash_ptr.c — Chương trình demo gây SIGSEGV (null pointer dereference)
- * Dùng trong buổi thuyết trình để minh họa phát hiện lỗi.
+ * crash_ptr.c — Demo program that triggers SIGSEGV (null pointer dereference)
+ * Used in presentations to demonstrate error detection.
  *
  * Compile: gcc -o crash_ptr crash_ptr.c
- * Chạy   : ./crash_ptr
+ * Run    : ./crash_ptr
  */
 
 #include <stdio.h>
@@ -11,16 +11,16 @@
 
 int main(void)
 {
-    printf("Chuong trinh crash_ptr bat dau chay...\n");
-    printf("Chuan bi doc bo nho tai dia chi NULL...\n");
+    printf("crash_ptr starting...\n");
+    printf("Preparing to read memory at NULL...\n");
 
-    int *ptr = NULL;   /* Con tro null -- khong tro toi vung nho hop le */
+    int *ptr = NULL;   /* Null pointer -- does not point to valid memory */
 
-    printf("Doc gia tri tai dia chi NULL: ");
-    fflush(stdout);    /* Dam bao dong tren duoc in truoc khi crash */
+    printf("Reading value at NULL: ");
+    fflush(stdout);    /* Ensure the line above is printed before the crash */
 
-    printf("%d\n", *ptr);  /* <-- Dong nay gay SIGSEGV */
+    printf("%d\n", *ptr);  /* <-- This line triggers SIGSEGV */
 
-    printf("Dong nay KHONG BAO GIO duoc in\n");
+    printf("This line is NEVER printed\n");
     return 0;
 }

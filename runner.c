@@ -43,10 +43,10 @@ typedef struct {
 // Global variables — shared between signal handlers
  
 // PID of the currently running command (-1 = no command running)
-static volatile pid_t g_current_child = -1;
- 
+volatile pid_t g_current_child = -1;
+
 // PID of the command being monitored for timeout (-1 = none)
-static volatile pid_t g_timeout_child = -1;
+volatile pid_t g_timeout_child = -1;
  
 // Default timeout in seconds — main.c can override this via --timeout
 int g_timeout_secs = 10;

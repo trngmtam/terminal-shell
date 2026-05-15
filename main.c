@@ -8,7 +8,7 @@
 extern int g_timeout_secs;
 
 int main(int argc, char *argv[]) {
-    // Đăng ký signal handlers (Member B)
+    // Register signal handlers (Member B)
     setup_signals();
 
     // SCRIPT MODE
@@ -22,7 +22,7 @@ int main(int argc, char *argv[]) {
             } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
                 g_timeout_secs = atoi(argv[++i]);
                 if (g_timeout_secs <= 0) g_timeout_secs = 10;
-                printf("[Timeout: %d giây]\n", g_timeout_secs);
+                printf("[Timeout: %d seconds]\n", g_timeout_secs);
             }
         }
 
@@ -33,10 +33,10 @@ int main(int argc, char *argv[]) {
     // INTERACTIVE MODE 
     char input[MAX_INPUT];
 
-    printf("\033[1mmyshell\033[0m — Gõ 'help' để xem lệnh hỗ trợ, 'exit' để thoát\n\n");
+    printf("\033[1mmyshell\033[0m — Type 'help' to see built-in commands, 'exit' to quit\n\n");
 
     while (1) {
-        // In prompt: hiện thư mục hiện tại
+        // Print prompt: show current directory
         char cwd[MAX_INPUT];
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
             printf("\033[32m%s\033[0m \033[1mmyshell>\033[0m ", cwd);
@@ -45,19 +45,19 @@ int main(int argc, char *argv[]) {
         }
         fflush(stdout);
 
-        // Đọc input
+        // Read input
         if (fgets(input, MAX_INPUT, stdin) == NULL) {
             printf("\n");
-            break; // Ctrl+D → thoát
+            break; // Ctrl+D → quit
         }
 
-        // Xóa newline cuối
+        // Strip trailing newline
         input[strcspn(input, "\n")] = '\0';
 
-        // Bỏ qua dòng trống
+        // Skip blank lines
         if (strlen(input) == 0) continue;
 
-        // Tách lệnh thành args
+        // Tokenize input into args
         char *args[MAX_ARGS];
         char  input_copy[MAX_INPUT];
         strncpy(input_copy, input, MAX_INPUT - 1);
@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
         int argc_cmd = tokenize(input_copy, args);
         if (argc_cmd == 0) continue;
 
-        // Thực thi lệnh (Member A lo pipe, redirect, built-in, fork/exec)
+        // Execute command (Member A handles pipe, redirect, built-in, fork/exec)
         execute_command(args, 0);
     }
 
