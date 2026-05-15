@@ -1,17 +1,17 @@
 /*
- * runner.c — Đọc file script và chạy từng lệnh
+ * runner.c — Read script file and run each command
  *
- * Gồm 6 phần:
- *   Phần 1: RunStats          — struct đếm kết quả chạy script
- *   Phần 2: sigint_handler()  — xử lý Ctrl+C, chỉ kill lệnh đang chạy
- *   Phần 3: sigalrm_handler() — xử lý timeout, kill lệnh chạy quá giờ
- *   Phần 4: setup_signals()   — đăng ký Phần 2 và 3 với hệ điều hành
- *   Phần 5: run_with_timeout()— bọc execute_command() thêm đồng hồ đếm ngược
- *   Phần 6: run_script()      — đọc từng dòng file .sh và chạy
+ * Includes 6 parts:
+ *   Part 1: RunStats          — struct to track script execution results
+ *   Part 2: sigint_handler()  — handle Ctrl+C, only kill the running command
+ *   Part 3: sigalrm_handler() — handle timeout, kill commands that run too long
+ *   Part 4: setup_signals()   — register Parts 2 and 3 with the OS
+ *   Part 5: run_with_timeout()— wrap execute_command() with a countdown timer
+ *   Part 6: run_script()      — read each line of a .sh file and execute it
  */
-
+ 
 #include "shared.h"
-
+ 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,301 +19,267 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <fcntl.h>
-
-
-/* -------------------------------------------------------
- * Phần 1: RunStats — Bảng thống kê kết quả chạy script
- *
- * Ý nghĩa: Theo dõi bao nhiêu lệnh thành công, thất bại
- *          và lưu danh sách các lệnh bị lỗi để in báo cáo cuối
- * ------------------------------------------------------- */
-
-// Tối đa lưu 20 lệnh lỗi — tránh tốn bộ nhớ khi script có nhiều lỗi
+ 
+ 
+// Part 1: RunStats — Execution result summary table
+// Purpose: Track how many commands succeeded or failed, and store the list of
+//          failed commands to print a final report
+ 
+// Store at most 20 failed commands — avoids excess memory use when script has many errors
 #define MAX_FAILED_CMDS 20
-
+ 
 typedef struct {
-    int total;   // Tổng số lệnh đã chạy (không tính dòng trống và comment)
-    int passed;  // Số lệnh thành công (exit_code == 0)
-    int failed;  // Số lệnh thất bại (exit_code != 0 hoặc bị crash)
-
-    // Mảng 2 chiều lưu tên các lệnh bị lỗi
-    // failed_cmds[0] = "Dong 3: ./buggy"
-    // failed_cmds[1] = "Dong 7: gcc main.c"
+    int total;   // Total commands executed (excludes blank lines and comments)
+    int passed;  // Commands that succeeded (exit_code == 0)
+    int failed;  // Commands that failed (exit_code != 0 or crashed)
+ 
+    // 2D array storing the names of failed commands
+    // failed_cmds[0] = "Line 3: ./buggy"
+    // failed_cmds[1] = "Line 7: gcc main.c"
     char failed_cmds[MAX_FAILED_CMDS][MAX_INPUT];
 } RunStats;
-
-
-/* -------------------------------------------------------
- * Biến toàn cục — dùng chung giữa các signal handler
- *
- * volatile: báo compiler KHÔNG cache biến này vào register
- *           vì signal handler có thể thay đổi bất cứ lúc nào
- * static:   chỉ dùng trong file runner.c, file khác không thấy
- * ------------------------------------------------------- */
-
-// PID của lệnh đang chạy (-1 = không có lệnh nào)
+ 
+ 
+// Global variables — shared between signal handlers
+ 
+// PID of the currently running command (-1 = no command running)
 static volatile pid_t g_current_child = -1;
-
-// PID của lệnh đang bị theo dõi timeout (-1 = không có)
+ 
+// PID of the command being monitored for timeout (-1 = none)
 static volatile pid_t g_timeout_child = -1;
-
-// Số giây timeout mặc định — main.c có thể thay đổi qua --timeout
+ 
+// Default timeout in seconds — main.c can override this via --timeout
 int g_timeout_secs = 10;
-
-
-/* -------------------------------------------------------
- * Phần 2: sigint_handler() — Xử lý Ctrl+C
- *
- * Ý nghĩa: Khi người dùng nhấn Ctrl+C, thay vì tắt cả shell
- *          chỉ kill lệnh đang chạy, shell vẫn sống
- *
- * Cách hoạt động: Hệ điều hành tự gọi hàm này khi nhận Ctrl+C
- *                 (được đăng ký ở Phần 4 - setup_signals)
- * ------------------------------------------------------- */
+ 
+ 
+// Part 2: sigint_handler() — Handle Ctrl+C
+// Purpose: When the user presses Ctrl+C, kill only the running command instead
+//          of exiting the shell — the shell stays alive
+// How it works: The OS calls this function automatically on Ctrl+C
+//               (registered in Part 4 - setup_signals)
 static void sigint_handler(int sig) {
-    // Không dùng tham số sig — báo compiler đừng cảnh báo
     (void)sig;
-
+ 
     if (g_current_child > 0) {
-        // Có lệnh đang chạy → gửi SIGINT đến lệnh đó
-        // SIGINT = tín hiệu "dừng lịch sự", giống Ctrl+C trực tiếp vào lệnh
+        // A command is running → forward SIGINT to that command
         kill(g_current_child, SIGINT);
-
-        // Dùng write() thay printf() vì signal handler không được dùng printf()
-        // printf không an toàn khi bị ngắt giữa chừng → có thể deadlock
-        const char msg[] = "\n[Đã gửi SIGINT đến lệnh đang chạy]\n";
-        write(STDOUT_FILENO, msg, sizeof(msg) - 1); // sizeof - 1 để bỏ ký tự '\0' cuối
+ 
+        // Use write() instead of printf() because signal handlers must not call printf()
+        // printf is not safe when interrupted mid-execution — it can deadlock
+        const char msg[] = "\n[SIGINT sent to running command]\n";
+        write(STDOUT_FILENO, msg, sizeof(msg) - 1); // sizeof - 1 to exclude the '\0' terminator
     } else {
-        // Không có lệnh nào đang chạy → nhắc người dùng cách thoát
-        const char msg[] = "\n(Không có lệnh đang chạy. Nhấn Ctrl+D hoặc gõ exit để thoát)\nmyshell> ";
+        // No command is running → remind the user how to exit
+        const char msg[] = "\n(No command running. Press Ctrl+D or type exit to quit)\nmyshell> ";
         write(STDOUT_FILENO, msg, sizeof(msg) - 1);
     }
 }
-
-
-/* -------------------------------------------------------
- * Phần 3: sigalrm_handler() — Xử lý Timeout
- *
- * Ý nghĩa: Khi lệnh chạy quá g_timeout_secs giây,
- *          hệ điều hành gửi SIGALRM → hàm này kill lệnh đó
- *
- * Khác Phần 2: dùng SIGKILL thay SIGINT vì:
- *   SIGINT  = "dừng lại đi" → process có thể bỏ qua
- *   SIGKILL = "tắt ngay"    → process KHÔNG THỂ bỏ qua, OS kill luôn
- *
- * Cách hoạt động: alarm(N) ở Phần 5 đặt đồng hồ N giây
- *                 Sau N giây OS gửi SIGALRM → hàm này được gọi
- * ------------------------------------------------------- */
+ 
+ 
+// Part 3: sigalrm_handler() — Handle Timeout
+// Purpose: When a command runs longer than g_timeout_secs seconds,
+//          the OS sends SIGALRM → this function kills that command
+// Difference from Part 2: uses SIGKILL instead of SIGINT because:
+//   SIGINT  = "please stop" → process can ignore it
+//   SIGKILL = "stop now"    → process CANNOT ignore it, OS kills immediately
+// How it works: alarm(N) in Part 5 sets a countdown of N seconds
+//               After N seconds, OS sends SIGALRM → this function is called
 static void sigalrm_handler(int sig) {
     (void)sig;
-
+ 
     if (g_timeout_child > 0) {
-        // Lệnh vẫn đang chạy sau khi hết giờ → kill ngay lập tức
+        // Command is still running after the deadline → kill it immediately
         kill(g_timeout_child, SIGKILL);
-
-        // Tạo thông báo kèm số giây timeout
-        // Phải dùng snprintf vì cần điền số giây vào chuỗi
+ 
+        // Build the message with the timeout duration filled in
+        // Must use snprintf because we need to embed the number of seconds
         char msg[128];
         int len = snprintf(msg, sizeof(msg),
-            "\n\033[31m[TIMEOUT] Lệnh bị kill sau %d giây\033[0m\n",
-            // \033[31m = màu đỏ, \033[0m = reset màu
+            "\n\033[31m[TIMEOUT] Command killed after %d seconds\033[0m\n",
+            // \033[31m = red color, \033[0m = reset color
             g_timeout_secs);
-
-        // len = độ dài thật của msg sau khi điền số giây vào
+ 
+        // len = actual length of msg after the number is filled in
         write(STDOUT_FILENO, msg, len);
     }
-    // Nếu g_timeout_child <= 0: lệnh đã xong trước khi hết giờ → bỏ qua
+    // If g_timeout_child <= 0: command already finished before deadline → do nothing
 }
-
-
-/* -------------------------------------------------------
- * Phần 4: setup_signals() — Đăng ký Signal Handlers
- *
- * Ý nghĩa: Nói với hệ điều hành "khi có Ctrl+C thì gọi hàm nào,
- *          khi hết giờ thì gọi hàm nào"
- *
- * Gọi 1 lần duy nhất trong main() trước khi làm bất cứ điều gì
- * Sau khi gọi xong: Phần 2 và Phần 3 tự động hoạt động khi có signal
- * ------------------------------------------------------- */
+ 
+ 
+// Part 4: setup_signals() — Register Signal Handlers
+// Purpose: Tell the OS "which function to call on Ctrl+C,
+//          and which function to call when the timer expires"
+// Called once in main() before anything else runs
+// After this call: Parts 2 and 3 activate automatically when signals arrive
 void setup_signals(void) {
-    // struct sigaction: cấu hình chi tiết cách xử lý 1 signal
+    // struct sigaction: detailed configuration for handling one signal
     struct sigaction sa;
-
-    // --- Đăng ký xử lý Ctrl+C (SIGINT) ---
-    memset(&sa, 0, sizeof(sa));       // xóa sạch struct về 0 trước khi dùng
-    sa.sa_handler = sigint_handler;   // hàm sẽ được gọi khi có Ctrl+C (Phần 2)
-    sigemptyset(&sa.sa_mask);         // không chặn signal nào khác trong lúc xử lý
-    sa.sa_flags = SA_RESTART;         // tự động restart các system call bị ngắt giữa chừng
-    sigaction(SIGINT, &sa, NULL);     // đăng ký với OS: SIGINT → sigint_handler
-
-    // --- Đăng ký xử lý Timeout (SIGALRM) ---
-    memset(&sa, 0, sizeof(sa));       // reset struct để dùng lại cho signal khác
-    sa.sa_handler = sigalrm_handler;  // hàm sẽ được gọi khi hết giờ (Phần 3)
+ 
+    // --- Register Ctrl+C handler (SIGINT) ---
+    memset(&sa, 0, sizeof(sa));       // zero out the struct before use
+    sa.sa_handler = sigint_handler;   // function to call on Ctrl+C (Part 2)
+    sigemptyset(&sa.sa_mask);         // don't block any other signals during handling
+    sa.sa_flags = SA_RESTART;         // auto-restart system calls interrupted by this signal
+    sigaction(SIGINT, &sa, NULL);     // register with OS: SIGINT → sigint_handler
+ 
+    // --- Register Timeout handler (SIGALRM) ---
+    memset(&sa, 0, sizeof(sa));       // reset struct to reuse for another signal
+    sa.sa_handler = sigalrm_handler;  // function to call when timer expires (Part 3)
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
-    sigaction(SIGALRM, &sa, NULL);    // đăng ký với OS: SIGALRM → sigalrm_handler
-
-    // --- Bỏ qua SIGPIPE ---
-    // SIGPIPE xảy ra khi ghi vào pipe không có ai đọc
-    // (ví dụ: lệnh bên phải của pipe đã chết trước)
-    // SIG_IGN = ignore, bỏ qua hoàn toàn → tránh shell bị crash vì lý do này
+    sigaction(SIGALRM, &sa, NULL);    // register with OS: SIGALRM → sigalrm_handler
+ 
+    // --- Ignore SIGPIPE ---
+    // SIGPIPE occurs when writing to a pipe with no reader
+    // (e.g., the right side of a pipe already exited)
+    // SIG_IGN = ignore completely → prevents the shell from crashing for this reason
     signal(SIGPIPE, SIG_IGN);
 }
-
-
-/* -------------------------------------------------------
- * Phần 5: run_with_timeout() — Chạy lệnh kèm đồng hồ timeout
- *
- * Ý nghĩa: Bọc execute_command() thêm lớp bảo vệ timeout
- *          Bật đồng hồ trước → chạy lệnh → tắt đồng hồ sau
- *
- * Nếu lệnh xong trước khi hết giờ: alarm(0) hủy đồng hồ → bình thường
- * Nếu lệnh chạy quá giờ: SIGALRM kích hoạt Phần 3 → kill lệnh
- * ------------------------------------------------------- */
+ 
+ 
+// Part 5: run_with_timeout() — Run a command with a timeout timer
+// Purpose: Wrap execute_command() with a timeout safety layer
+//          Start the timer before → run the command → cancel the timer after
+// If the command finishes before the deadline: alarm(0) cancels the timer → normal exit
+// If the command exceeds the deadline: SIGALRM triggers Part 3 → command is killed
 static CmdResult run_with_timeout(char **args, int line_num) {
-    // Đặt = 0 báo hiệu "có lệnh đang chạy nhưng chưa biết PID"
-    // (vì execute_command tự fork bên trong, ta không lấy được PID trực tiếp)
+    // Set to 0 to signal "a command is about to run but PID is not yet known"
+    // (because execute_command forks internally, we can't get the PID directly)
     g_timeout_child = 0;
-
-    // Bắt đầu đếm ngược — sau g_timeout_secs giây OS sẽ gửi SIGALRM
+ 
+    // Start countdown — after g_timeout_secs seconds, OS will send SIGALRM
     alarm(g_timeout_secs);
-
-    // Chạy lệnh thật (hàm từ shell.c) — có thể mất vài giây
+ 
+    // Run the actual command (function from shell.c) — may take several seconds
     CmdResult res = execute_command(args, line_num);
-
-    // Lệnh xong → hủy đồng hồ ngay
-    // alarm(0) = cancel alarm đang chạy, SIGALRM sẽ không được gửi nữa
+ 
+    // Command finished → cancel the timer immediately
+    // alarm(0) = cancel any pending alarm, SIGALRM will no longer be sent
     alarm(0);
-
-    // Reset về -1 báo hiệu "không còn lệnh nào cần theo dõi"
+ 
+    // Reset to -1 to signal "no command needs monitoring anymore"
     g_timeout_child = -1;
-
+ 
     return res;
 }
-
-
-/* -------------------------------------------------------
- * Phần 6: run_script() — Đọc và Chạy File Script
- *
- * Ý nghĩa: Mở file .sh, đọc từng dòng, bỏ qua comment và
- *          dòng trống, chạy từng lệnh, thống kê kết quả,
- *          in báo cáo tổng kết cuối cùng
- *
- * Được gọi bởi main() khi người dùng chạy: ./shell script.sh
- * ------------------------------------------------------- */
+ 
+ 
+// Part 6: run_script() — Read and Execute a Script File
+// Purpose: Open a .sh file, read line by line, skip comments and blank lines,
+//          run each command, track statistics, print a final summary report
+// Called by main() when the user runs: ./shell script.sh
 void run_script(const char *filename, int stop_on_error) {
-
-    // Mở file script để đọc
+ 
+    // Open the script file for reading
     FILE *fp = fopen(filename, "r");
-
+ 
     if (fp != NULL) {
-        // FD_CLOEXEC: tự động đóng file descriptor này khi process con fork ra
-        // Ngăn process con vô tình đọc lại nội dung file script qua stdin
-        int fd = fileno(fp);  // lấy số file descriptor của fp
+        // FD_CLOEXEC: automatically close this file descriptor when a child process forks
+        // Prevents child processes from accidentally reading the script file via stdin
+        int fd = fileno(fp);  // get the file descriptor number of fp
         fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
-        //         ↑ set flag    ↑ lấy flag cũ   ↑ thêm FD_CLOEXEC vào flag cũ
+        //         ↑ set flag    ↑ get old flag   ↑ OR in FD_CLOEXEC to old flags
     }
-
-    // Kiểm tra mở file có thành công không
+ 
+    // Check if the file opened successfully
     if (fp == NULL) {
-        fprintf(stderr, "\033[31mLỗi: Không mở được file '%s'\033[0m\n", filename);
-        exit(1);  // thoát chương trình, không chạy tiếp được
+        fprintf(stderr, "\033[31mError: Cannot open file '%s'\033[0m\n", filename);
+        exit(1);  // exit the program, cannot proceed
     }
-
-    // Khởi tạo bảng thống kê — xóa toàn bộ về 0
+ 
+    // Initialize the stats table — zero everything out
     RunStats stats;
     memset(&stats, 0, sizeof(stats));
-
-    char raw_line[MAX_INPUT];  // buffer chứa từng dòng đọc từ file
-    int  line_num = 0;         // đếm số dòng (kể cả dòng trống và comment)
-
-    printf("\033[1m===== Bắt đầu chạy script: %s =====\033[0m\n\n", filename);
-
-    // Đọc từng dòng cho đến hết file
-    // fgets đọc 1 dòng vào raw_line, trả về NULL khi hết file
+ 
+    char raw_line[MAX_INPUT];  // buffer holding each line read from the file
+    int  line_num = 0;         // line counter (includes blank lines and comments)
+ 
+    printf("\033[1m===== Running script: %s =====\033[0m\n\n", filename);
+ 
+    // Read one line at a time until end of file
+    // fgets reads one line into raw_line, returns NULL at EOF
     while (fgets(raw_line, MAX_INPUT, fp) != NULL) {
-        line_num++;  // tăng số dòng dù dòng này có chạy hay không
-
-        // Xóa ký tự '\n' ở cuối dòng mà fgets giữ lại
-        // strcspn trả về vị trí đầu tiên của '\n' trong chuỗi
+        line_num++;  // increment even if this line won't be executed
+ 
+        // Remove the trailing '\n' that fgets keeps
+        // strcspn returns the position of the first '\n' in the string
         raw_line[strcspn(raw_line, "\n")] = '\0';
-
-        // Bỏ qua khoảng trắng và tab ở đầu dòng
-        // Dịch con trỏ line về phía trước đến ký tự thật đầu tiên
+ 
+        // Skip leading spaces and tabs
+        // Advance the line pointer forward to the first real character
         char *line = raw_line;
         while (*line == ' ' || *line == '\t') line++;
-
-        // Bỏ qua dòng trống (*line == '\0') và dòng comment (*line == '#')
+ 
+        // Skip blank lines (*line == '\0') and comment lines (*line == '#')
         if (*line == '\0' || *line == '#') continue;
-
-        // In số dòng và nội dung lệnh ra màn hình (màu xám)
-        printf("\033[90m[Dòng %d]\033[0m %s\n", line_num, line);
-
-        // Copy dòng lệnh sang buffer mới TRƯỚC KHI tách
-        // Vì tokenize() dùng strtok() sẽ sửa trực tiếp chuỗi bằng cách chèn '\0'
-        // Cần giữ nguyên chuỗi gốc (line) để lưu vào failed_cmds nếu lệnh lỗi
+ 
+        // Print the line number and command content (in gray)
+        printf("\033[90m[Line %d]\033[0m %s\n", line_num, line);
+ 
+        // Copy the command line to a new buffer BEFORE tokenizing
+        // Because tokenize() uses strtok() which modifies the string in place by inserting '\0'
+        // We need to keep the original string (line) to store in failed_cmds if the command fails
         char line_copy[MAX_INPUT];
         strncpy(line_copy, line, MAX_INPUT - 1);
-        line_copy[MAX_INPUT - 1] = '\0';  // đảm bảo luôn có '\0' ở cuối
-
-        // Tách chuỗi lệnh thành mảng args[]
+        line_copy[MAX_INPUT - 1] = '\0';  // always ensure null terminator at end
+ 
+        // Split the command string into an args[] array
         // "gcc -o main main.c" → ["gcc", "-o", "main", "main.c", NULL]
         char *args[MAX_ARGS];
-        tokenize(line_copy, args);  // hàm từ shell.c
-
-        // Bỏ qua nếu không tách được từ nào (dòng chỉ có khoảng trắng)
+        tokenize(line_copy, args);  // function from shell.c
+ 
+        // Skip if no tokens were parsed (line was only whitespace)
         if (args[0] == NULL) continue;
-
-        // Đếm vào tổng số lệnh đã chạy
+ 
+        // Count this as one executed command
         stats.total++;
-
-        // Chạy lệnh qua Phần 5 (kèm đồng hồ timeout)
-        // Trả về CmdResult chứa exit_code và signal_num
+ 
+        // Run the command through Part 5 (with timeout timer)
+        // Returns a CmdResult containing exit_code and signal_num
         CmdResult res = run_with_timeout(args, line_num);
-
+ 
         if (res.exit_code == 0 && res.signal_num == 0) {
-            // Thành công: thoát bình thường với exit code = 0
+            // Success: exited normally with exit code 0
             stats.passed++;
         } else {
-            // Thất bại: exit code khác 0 hoặc bị kill bởi signal
+            // Failure: non-zero exit code or killed by a signal
             stats.failed++;
-
-            // Lưu thông tin lệnh lỗi vào danh sách (tối đa MAX_FAILED_CMDS)
+ 
+            // Save the failed command info to the list (up to MAX_FAILED_CMDS)
             if (stats.failed <= MAX_FAILED_CMDS) {
                 snprintf(stats.failed_cmds[stats.failed - 1],
                          MAX_INPUT - 1,
-                         "Dong %d: %.900s",  // %.900s giới hạn 900 ký tự tên lệnh
-                         line_num, line);    // line = chuỗi gốc trước khi tokenize sửa
+                         "Line %d: %.900s",  // %.900s limits command name to 900 chars
+                         line_num, line);    // line = original string before tokenize modified it
             }
-
-            // Nếu người dùng bật --stop: dừng script ngay tại đây
+ 
+            // If the user enabled --stop: halt the script here
             if (stop_on_error) {
-                printf("\033[31m[ABORT] Dừng script do lỗi ở dòng %d\033[0m\n", line_num);
-                break;  // thoát vòng while, không chạy các dòng tiếp theo
+                printf("\033[31m[ABORT] Stopping script due to error at line %d\033[0m\n", line_num);
+                break;  // exit the while loop, skip remaining lines
             }
         }
     }
+ 
+    fclose(fp);  // close the file after reading is done or after break
+ 
 
-    fclose(fp);  // đóng file sau khi đọc xong hoặc bị break
-
-    // -------------------------------------------------------
-    // In báo cáo tổng kết
-    // -------------------------------------------------------
-    printf("\n\033[1m===== KẾT QUẢ CHẠY SCRIPT =====\033[0m\n");
-    printf("Tổng lệnh đã chạy : %d\n",  stats.total);
-    printf("\033[32mThành công (OK)   : %d\033[0m\n", stats.passed);  // màu xanh lá
-    printf("\033[31mThất bại (FAILED) : %d\033[0m\n", stats.failed);  // màu đỏ
-
-    // Nếu có lệnh lỗi → in danh sách chi tiết
+    // Print final summary report
+    printf("\n\033[1m---- SCRIPT EXECUTION RESULT -----\033[0m\n");
+    printf("Total commands run  : %d\n",  stats.total);
+    printf("\033[32mSucceeded (OK)      : %d\033[0m\n", stats.passed);  // green
+    printf("\033[31mFailed    (FAILED)  : %d\033[0m\n", stats.failed);  // red
+ 
+    // If there are failed commands → print the detailed list
     if (stats.failed > 0) {
-        printf("\nCác lệnh bị lỗi:\n");
-
-        // Chỉ in tối đa MAX_FAILED_CMDS dòng để tránh in quá dài
+        printf("\nFailed commands:\n");
+ 
+        // Only print up to MAX_FAILED_CMDS lines to avoid an overly long report
         int show = stats.failed < MAX_FAILED_CMDS ? stats.failed : MAX_FAILED_CMDS;
         for (int i = 0; i < show; i++) {
             printf("  \033[31m✗\033[0m %s\n", stats.failed_cmds[i]);
-            //       ↑ dấu X màu đỏ  ↑ tên lệnh bị lỗi
+            //       ↑ red X mark  ↑ name of the failed command
         }
     }
-    printf("================================\n");
+    printf("-----------\n");
 }
