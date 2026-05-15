@@ -1,11 +1,3 @@
-/*
- * myshell.c — A simple Unix shell implementation
- * Member A: REPL + Tokenizer + Fork/Exec + Pipe + Redirect + Builtins
- *
- * Compile: gcc -o shell shell.c -Wall
- * Run:     ./shell
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,30 +6,30 @@
 #include <fcntl.h>
 #include <errno.h>
 
-/* ─── Constants ─────────────────────────────────────────────────── */
+
+// Constants
 #define MAX_INPUT    1024
 #define MAX_ARGS     64
 #define MAX_PIPES    16
 #define DELIMITERS   " \t\r\n"
 
-/* ─── Struct: parsed command ─────────────────────────────────────── */
+
+// Command — holds a parsed command with its arguments and redirects
 typedef struct {
-    char *args[MAX_ARGS];   /* argument list, NULL-terminated        */
-    int   argc;             /* number of arguments                   */
-    char *in_file;          /* redirect stdin  (<)                   */
-    char *out_file;         /* redirect stdout (>)                   */
-    int   append;           /* 1 = append (>>), 0 = truncate (>)     */
+    char *args[MAX_ARGS];   // argument list, NULL-terminated
+    int   argc;             // number of arguments
+    char *in_file;          // redirect stdin  (<)
+    char *out_file;         // redirect stdout (>)
+    int   append;           // 1 = append (>>), 0 = truncate (>)
 } Command;
 
-/* ═══════════════════════════════════════════════════════════════════
- *  TASK 2 — Tokenizer
- * ═══════════════════════════════════════════════════════════════════ */
 
-/*
- * tokenize_raw:
- *   Split `input` on whitespace and fill `args`.
- *   Returns number of tokens found.
- */
+// Part 1: Tokenizer
+
+
+// tokenize_raw:
+// Split `input` on whitespace and fill `args`.
+// Returns the number of tokens found.
 static int tokenize_raw(char *input, char **args)
 {
     int count = 0;
@@ -50,11 +42,9 @@ static int tokenize_raw(char *input, char **args)
     return count;
 }
 
-/*
- * parse_command:
- *   Build a Command from a raw token list, stripping redirect
- *   operators (>, >>, <) and recording their file names.
- */
+// parse_command:
+// Build a Command from a raw token list, stripping redirect
+// operators (>, >>, <) and recording their target file names.
 static void parse_command(char **tokens, int ntok, Command *cmd)
 {
     memset(cmd, 0, sizeof(Command));
@@ -77,20 +67,18 @@ static void parse_command(char **tokens, int ntok, Command *cmd)
     cmd->argc    = j;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- *  TASK 6 — Built-in commands
- * ═══════════════════════════════════════════════════════════════════ */
 
-/*
- * handle_builtin:
- *   Returns 1 and executes the command if it is a built-in.
- *   Returns 0 if the command should be dispatched externally.
- */
+// Part 2: Built-in commands
+
+
+// handle_builtin:
+// Executes the command if it is a built-in, then returns 1.
+// Returns 0 if the command is not a built-in and should be run externally.
 static int handle_builtin(char **args)
 {
     if (args[0] == NULL) return 1;
 
-    /* ── cd ── */
+    // cd — change working directory
     if (strcmp(args[0], "cd") == 0) {
         const char *path = args[1] ? args[1] : getenv("HOME");
         if (path == NULL) path = "/";
@@ -99,7 +87,7 @@ static int handle_builtin(char **args)
         return 1;
     }
 
-    /* ── pwd ── */
+    // pwd — print current working directory
     if (strcmp(args[0], "pwd") == 0) {
         char cwd[MAX_INPUT];
         if (getcwd(cwd, sizeof(cwd)) != NULL)
@@ -109,13 +97,13 @@ static int handle_builtin(char **args)
         return 1;
     }
 
-    /* ── exit ── */
+    // exit — quit the shell
     if (strcmp(args[0], "exit") == 0) {
         printf("Goodbye!\n");
         exit(0);
     }
 
-    /* ── help ── */
+    // help — list available built-in commands
     if (strcmp(args[0], "help") == 0) {
         printf("myshell — available built-in commands:\n");
         printf("  cd [dir]   change working directory\n");
@@ -130,17 +118,16 @@ static int handle_builtin(char **args)
         return 1;
     }
 
-    return 0; /* not a built-in */
+    return 0; // not a built-in
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- *  TASK 3 — Fork / Exec  (single command, with optional redirect)
- * ═══════════════════════════════════════════════════════════════════ */
 
-/*
- * apply_redirects:
- *   Called inside the child process to wire up file descriptors.
- */
+// Part 3: Fork / Exec (single command, with optional redirect)
+
+
+// apply_redirects:
+// Called inside the child process to wire up file descriptors
+// before exec. Handles < (stdin) and > / >> (stdout).
 static void apply_redirects(Command *cmd)
 {
     if (cmd->in_file) {
@@ -158,13 +145,11 @@ static void apply_redirects(Command *cmd)
     }
 }
 
-/*
- * execute_single:
- *   Fork and exec one Command.  Returns child's exit status.
- */
+// execute_single:
+// Fork and exec one Command. Returns the child's exit status.
 static int execute_single(Command *cmd)
 {
-    /* Built-ins must run in the parent process */
+    // Built-ins must run in the parent process, not a child
     if (handle_builtin(cmd->args)) return 0;
 
     pid_t pid = fork();
@@ -174,15 +159,15 @@ static int execute_single(Command *cmd)
     }
 
     if (pid == 0) {
-        /* ── child ── */
+        // Child process: apply redirects then exec the command
         apply_redirects(cmd);
         execvp(cmd->args[0], cmd->args);
-        /* execvp only returns on error */
+        // execvp only returns if it failed
         fprintf(stderr, "myshell: %s: command not found\n", cmd->args[0]);
         exit(127);
     }
 
-    /* ── parent: wait for child ── */
+    // Parent process: wait for the child to finish
     int status;
     waitpid(pid, &status, 0);
 
@@ -195,36 +180,33 @@ static int execute_single(Command *cmd)
     return -1;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- *  TASK 4 — Pipeline  (one or more commands joined by |)
- * ═══════════════════════════════════════════════════════════════════ */
 
-/*
- * execute_pipeline:
- *   Given an array of Commands of length n, wire them up with pipes.
- *   The first command may still have < redirect; the last may have > / >>.
- */
+// Part 4: Pipeline (one or more commands joined by |)
+
+
+// execute_pipeline:
+// Given an array of Commands of length n, wire them together with pipes.
+// The first command may have a < redirect; the last may have > or >>.
 static void execute_pipeline(Command *cmds, int n)
 {
+    // Single command — no pipe needed
     if (n == 1) {
         execute_single(&cmds[0]);
         return;
     }
 
-    /*
-     * Strategy:
-     *  - We keep track of the "read end" of the previous pipe.
-     *  - For each command we create a new pipe (except after the last).
-     *  - Each child inherits the right fds and closes everything else.
-     */
+    // Strategy:
+    // - Track the read-end of the previous pipe (prev_read).
+    // - For each stage, create a new pipe (except after the last command).
+    // - Each child inherits the correct fds and closes everything else.
 
-    int   prev_read = -1;   /* read-end of pipe from previous stage   */
+    int   prev_read = -1;   // read-end of pipe from the previous stage
     pid_t pids[MAX_PIPES];
 
     for (int i = 0; i < n; i++) {
         int pipefd[2] = {-1, -1};
 
-        /* create pipe between stage i and i+1 (not needed after last) */
+        // Create a pipe between stage i and stage i+1 (skip after last stage)
         if (i < n - 1) {
             if (pipe(pipefd) == -1) {
                 perror("pipe");
@@ -236,62 +218,58 @@ static void execute_pipeline(Command *cmds, int n)
         if (pid < 0) { perror("fork"); return; }
 
         if (pid == 0) {
-            /* ── child i ── */
+            // Child process for stage i
 
-            /* Connect previous pipe to stdin (unless first command) */
+            // Connect the previous pipe's read-end to stdin (skip for first command)
             if (prev_read != -1) {
                 dup2(prev_read, STDIN_FILENO);
                 close(prev_read);
             }
 
-            /* Connect write-end of our new pipe to stdout
-               (unless last command)                                  */
+            // Connect our new pipe's write-end to stdout (skip for last command)
             if (i < n - 1) {
                 dup2(pipefd[1], STDOUT_FILENO);
                 close(pipefd[0]);
                 close(pipefd[1]);
             }
 
-            /* File redirects (only meaningful on first / last stage) */
+            // Apply file redirects (< on first stage, > / >> on last stage)
             apply_redirects(&cmds[i]);
 
             execvp(cmds[i].args[0], cmds[i].args);
-            fprintf(stderr, "myshell: %s: command not found\n",
-                    cmds[i].args[0]);
+            fprintf(stderr, "myshell: %s: command not found\n", cmds[i].args[0]);
             exit(127);
         }
 
-        /* ── parent ── */
+        // Parent process bookkeeping
         pids[i] = pid;
 
-        /* Close the previous read-end now that it's been inherited */
+        // Close the previous read-end now that the child has inherited it
         if (prev_read != -1) close(prev_read);
 
-        /* The new read-end becomes prev_read for next iteration     */
+        // Pass the new read-end forward to the next iteration
         if (i < n - 1) {
-            close(pipefd[1]);          /* parent doesn't write here  */
+            close(pipefd[1]);       // parent never writes into this pipe
             prev_read = pipefd[0];
         }
     }
 
-    /* Wait for all children */
+    // Wait for all child processes to finish
     for (int i = 0; i < n; i++)
         waitpid(pids[i], NULL, 0);
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- *  High-level line dispatcher
- * ═══════════════════════════════════════════════════════════════════ */
 
-/*
- * run_line:
- *   Parse and execute one line of user input.
- *   Splits on '|' to find pipeline stages, then parses each stage's
- *   tokens into a Command (handling <, >, >>).
- */
+// Part 5: High-level line dispatcher
+
+
+// run_line:
+// Parse and execute one line of user input.
+// Splits on '|' to find pipeline stages, then parses each stage's
+// tokens into a Command (handling <, >, >>).
 static void run_line(char *line)
 {
-    /* --- Split line on '|' to get segments --- */
+    // Split the line on '|' to get individual pipeline segments
     char *segments[MAX_PIPES];
     int   nseg = 0;
 
@@ -320,9 +298,9 @@ static void run_line(char *line)
     execute_pipeline(cmds, nseg);
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- *  TASK 1 — REPL main loop
- * ═══════════════════════════════════════════════════════════════════ */
+
+// Part 6: REPL main loop
+
 
 int main(void)
 {
@@ -331,24 +309,24 @@ int main(void)
     printf("myshell — type 'help' for built-in commands, Ctrl+D to quit\n");
 
     while (1) {
-        /* Print prompt */
+        // Print the prompt
         printf("myshell> ");
         fflush(stdout);
 
-        /* Read a line */
+        // Read one line of input
+        // fgets returns NULL on EOF (Ctrl+D) → exit the loop
         if (fgets(input, MAX_INPUT, stdin) == NULL) {
-            /* Ctrl+D (EOF) */
             printf("\n");
             break;
         }
 
-        /* Strip trailing newline */
+        // Strip the trailing newline left by fgets
         input[strcspn(input, "\n")] = '\0';
 
-        /* Skip blank lines */
+        // Skip blank lines
         if (strlen(input) == 0) continue;
 
-        /* Make a working copy because strtok mutates the string */
+        // Copy input before passing to run_line — strtok mutates the string
         char copy[MAX_INPUT];
         strncpy(copy, input, MAX_INPUT - 1);
         copy[MAX_INPUT - 1] = '\0';
