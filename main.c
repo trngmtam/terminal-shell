@@ -1,12 +1,3 @@
-/*
- * main.c — Entry point của myshell
- *
- * Xử lý 2 mode:
- *   Interactive : ./shell               (REPL loop)
- *   Script      : ./shell script.sh     (chạy file)
- *   Script+stop : ./shell script.sh --stop
- *   Timeout     : ./shell script.sh --timeout 5
- */
 
 #include "shared.h"
 
@@ -14,15 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-/* g_timeout_secs khai báo ở runner.c — dùng extern để set từ main */
 extern int g_timeout_secs;
 
 int main(int argc, char *argv[]) {
     // Đăng ký signal handlers (Member B)
     setup_signals();
 
-    // ===== SCRIPT MODE =====
+    // SCRIPT MODE
     if (argc >= 2 && argv[1][0] != '-') {
         const char *filename  = argv[1];
         int stop_on_error = 0;
@@ -41,7 +30,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // ===== INTERACTIVE MODE (REPL) =====
+    // INTERACTIVE MODE 
     char input[MAX_INPUT];
 
     printf("\033[1mmyshell\033[0m — Gõ 'help' để xem lệnh hỗ trợ, 'exit' để thoát\n\n");
