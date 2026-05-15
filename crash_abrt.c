@@ -13,9 +13,9 @@ int main(void)
 {
     printf("crash_abrt starting...\n");
     printf("Calling abort() now...\n");
-    fflush(stdout);  /* Ensure the line above is printed before the crash */
+    fflush(stdout);  
 
-    abort();  /* <-- This triggers SIGABRT */
+    abort();  
 
     printf("This line is NEVER printed\n");
     return 0;

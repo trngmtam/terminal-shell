@@ -303,11 +303,13 @@ CmdResult execute_command(char **args, int line_num)
         g_timeout_child = pid;
 
         int status;
+        // suspends the parent until the child finishes.
         waitpid(pid, &status, 0);
 
         g_current_child = -1;
         g_timeout_child = -1;
 
+        // decodes status and decides what kind of error occurred
         check_and_report(cmds[0].args[0], status, line_num);
 
         if (WIFEXITED(status))   res.exit_code  = WEXITSTATUS(status);

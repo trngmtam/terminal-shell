@@ -115,12 +115,18 @@ static void report_exit_error(const char *cmd_name, int code, int line_num) {
     log_error(cmd_name, "EXIT_ERROR", "Non-zero exit code", line_num);
 }
 
+// decode status from waitpid in shell.c
 int check_and_report(const char *cmd_name, int status, int line_num) {
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
         if (code == 0) {
             return 0; // Success — print nothing
         }
+        // Interactive mode (line_num == 0): stay quiet on non-zero exit codes.
+        // Programs with `void main()` return undefined garbage as exit code,
+        // and the user can see the output for themselves. Crashes (signals)
+        // are still reported because they indicate real bugs.
+        if (line_num == 0) return -1;
         report_exit_error(cmd_name, code, line_num);
         return -1;
     }

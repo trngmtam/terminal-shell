@@ -21,8 +21,8 @@ int main(void)
     fflush(stdout);  /* Ensure the line above is printed before the crash */
 
     (void)b;         /* suppress unused-variable warning */
-    raise(SIGFPE);   /* ARM64 does not raise SIGFPE on integer divide-by-zero;
-                        raise() guarantees the signal is delivered */
+    raise(SIGFPE);   
+    
     printf("???\n"); /* never reached */
     printf("This line is NEVER printed\n");
     return 0;

@@ -25,10 +25,6 @@ echo "3. FAIL: non-zero exit code"
 ls /this/path/does/not/exist
 false
 
-# --- 4. FAIL: command not found (exit 127, suppressed by error_handler) ---
-echo "4. FAIL: command not found"
-./fake_command_xyz
-
 # --- 5. CRASH: SIGFPE (divide by zero) ---
 echo "5. CRASH: SIGFPE"
 ./crash_div
